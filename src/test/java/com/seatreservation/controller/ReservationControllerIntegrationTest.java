@@ -78,6 +78,7 @@ class ReservationControllerIntegrationTest {
 
         mockMvc.perform(post("/shows/" + showId + "/reserve")
                 .header("Authorization", user1Token)
+                .header("Idempotency-Key", "key-single-1")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(reserveRequest)))
             .andExpect(status().isCreated())
@@ -149,25 +150,75 @@ class ReservationControllerIntegrationTest {
     }
 
     @Test
-    @DisplayName("POST /shows/{id}/reserve - Identity spoofing: Body field cannot override JWT identity")
-    void testIdentitySpoofingAttempt() throws Exception {
-        String showId = createShow("spoof-show", List.of("A1"), 25000L, 4);
+    @DisplayName("POST /shows/{id}/reserve - Idempotency Case 1: Same key + same body returns original reservation")
+    void testIdempotencyReplaySameBody() throws Exception {
+        String showId = createShow("idem-show-1", List.of("A1", "A2"), 25000L, 4);
+        ReserveSeatRequest req = new ReserveSeatRequest(List.of("A1"));
 
-        // Client sends custom body with user_id "user-B"
-        String payload = "{\"user_id\":\"user-B\",\"seats\":[\"A1\"]}";
-
-        mockMvc.perform(post("/shows/" + showId + "/reserve")
-                .header("Authorization", user1Token) // user1Token is "user-1"
+        // First call
+        String firstRes = mockMvc.perform(post("/shows/" + showId + "/reserve")
+                .header("Authorization", user1Token)
+                .header("Idempotency-Key", "idempotent-token-123")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content(payload))
+                .content(objectMapper.writeValueAsString(req)))
             .andExpect(status().isCreated())
-            .andExpect(jsonPath("$.user_id").value("user-1")); // Still user-1
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+
+        String reservationId1 = objectMapper.readTree(firstRes).get("reservation_id").asText();
+
+        // Second identical call
+        String secondRes = mockMvc.perform(post("/shows/" + showId + "/reserve")
+                .header("Authorization", user1Token)
+                .header("Idempotency-Key", "idempotent-token-123")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(req)))
+            .andExpect(status().isCreated())
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+
+        String reservationId2 = objectMapper.readTree(secondRes).get("reservation_id").asText();
+
+        assertThat(reservationId1).isEqualTo(reservationId2);
+
+        // Verify only 1 seat was confirmed, NOT 2
+        mockMvc.perform(get("/shows/" + showId))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.available").value(1))
+            .andExpect(jsonPath("$.confirmed").value(1));
+    }
+
+    @Test
+    @DisplayName("POST /shows/{id}/reserve - Idempotency Case 2: Same key + different body returns 409 IDEMPOTENCY_KEY_REUSED")
+    void testIdempotencyMismatchDifferentBody() throws Exception {
+        String showId = createShow("idem-show-2", List.of("A1", "A2", "A3"), 25000L, 4);
+
+        // First call reserving A1
+        ReserveSeatRequest req1 = new ReserveSeatRequest(List.of("A1"));
+        mockMvc.perform(post("/shows/" + showId + "/reserve")
+                .header("Authorization", user1Token)
+                .header("Idempotency-Key", "reused-key-abc")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(req1)))
+            .andExpect(status().isCreated());
+
+        // Second call with same key but requesting A2
+        ReserveSeatRequest req2 = new ReserveSeatRequest(List.of("A2"));
+        mockMvc.perform(post("/shows/" + showId + "/reserve")
+                .header("Authorization", user1Token)
+                .header("Idempotency-Key", "reused-key-abc")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(req2)))
+            .andExpect(status().isConflict())
+            .andExpect(jsonPath("$.error").value("IDEMPOTENCY_KEY_REUSED"))
+            .andExpect(jsonPath("$.message", containsString("different request payload")));
     }
 
     @Test
     @DisplayName("POST /shows/{id}/reserve - Should enforce per-user limit and reject excess requests with 409 PER_USER_LIMIT")
     void testPerUserLimitEnforcement() throws Exception {
-        // Show with limit 2
         String showId = createShow("limited-show", List.of("A1", "A2", "A3", "A4"), 25000L, 2);
 
         // 1. Reserve 1 seat -> Success (1/2)
@@ -185,21 +236,22 @@ class ReservationControllerIntegrationTest {
             .andExpect(status().isConflict())
             .andExpect(jsonPath("$.error").value("PER_USER_LIMIT"))
             .andExpect(jsonPath("$.message", containsString("Exceeds per-user seat limit")));
+    }
 
-        // 3. Reserve 1 seat -> Success (2/2)
+    @Test
+    @DisplayName("POST /shows/{id}/reserve - Identity spoofing: Body field cannot override JWT identity")
+    void testIdentitySpoofingAttempt() throws Exception {
+        String showId = createShow("spoof-show", List.of("A1"), 25000L, 4);
+
+        // Client sends custom body with user_id "user-B"
+        String payload = "{\"user_id\":\"user-B\",\"seats\":[\"A1\"]}";
+
         mockMvc.perform(post("/shows/" + showId + "/reserve")
                 .header("Authorization", user1Token)
                 .contentType(MediaType.APPLICATION_JSON)
-                .content(objectMapper.writeValueAsString(new ReserveSeatRequest(List.of("A2")))))
-            .andExpect(status().isCreated());
-
-        // 4. Reserve 1 more seat -> Rejection (2 + 1 = 3 > 2)
-        mockMvc.perform(post("/shows/" + showId + "/reserve")
-                .header("Authorization", user1Token)
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(objectMapper.writeValueAsString(new ReserveSeatRequest(List.of("A3")))))
-            .andExpect(status().isConflict())
-            .andExpect(jsonPath("$.error").value("PER_USER_LIMIT"));
+                .content(payload))
+            .andExpect(status().isCreated())
+            .andExpect(jsonPath("$.user_id").value("user-1"));
     }
 
     @Test

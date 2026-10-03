@@ -25,11 +25,12 @@ public class ReservationController {
     @PostMapping("/shows/{id}/reserve")
     public ResponseEntity<ReservationResponse> reserveSeats(
         @PathVariable("id") UUID id,
+        @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
         @AuthenticationPrincipal UserPrincipal principal,
         @Valid @RequestBody ReserveSeatRequest request
     ) {
         String userId = principal.getUserId();
-        ReservationResponse response = reservationService.reserveSeats(id, userId, request);
+        ReservationResponse response = reservationService.reserveSeats(id, userId, idempotencyKey, request);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 }
