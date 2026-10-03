@@ -2,7 +2,9 @@ package com.seatreservation.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.seatreservation.dto.CreateShowRequest;
+import com.seatreservation.security.JwtService;
 import io.zonky.test.db.AutoConfigureEmbeddedDatabase;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -32,24 +34,64 @@ class ShowControllerIntegrationTest {
     @Autowired
     private ObjectMapper objectMapper;
 
+    @Autowired
+    private JwtService jwtService;
+
+    private String adminToken;
+    private String userToken;
+
+    @BeforeEach
+    void setUp() {
+        adminToken = "Bearer " + jwtService.generateToken("admin-user", "ADMIN");
+        userToken = "Bearer " + jwtService.generateToken("regular-user", "USER");
+    }
+
     @Test
-    @DisplayName("POST /shows - Should create show successfully and return 201 Created")
-    void testCreateShowSuccess() throws Exception {
+    @DisplayName("POST /shows - Should reject unauthenticated request with 401 Unauthorized")
+    void testCreateShowUnauthenticated() throws Exception {
+        CreateShowRequest request = new CreateShowRequest("friday-night", List.of("A1"), 25000L, 4);
+
+        mockMvc.perform(post("/shows")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(request)))
+            .andExpect(status().isUnauthorized())
+            .andExpect(jsonPath("$.error").value("UNAUTHORIZED"))
+            .andExpect(jsonPath("$.request_id").isNotEmpty());
+    }
+
+    @Test
+    @DisplayName("POST /shows - Should reject regular user request with 403 Forbidden")
+    void testCreateShowForbiddenForUser() throws Exception {
+        CreateShowRequest request = new CreateShowRequest("friday-night", List.of("A1"), 25000L, 4);
+
+        mockMvc.perform(post("/shows")
+                .header("Authorization", userToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(request)))
+            .andExpect(status().isForbidden())
+            .andExpect(jsonPath("$.error").value("FORBIDDEN"))
+            .andExpect(jsonPath("$.request_id").isNotEmpty());
+    }
+
+    @Test
+    @DisplayName("POST /shows - Should create show when authenticated as ADMIN")
+    void testCreateShowSuccessWithAdmin() throws Exception {
         CreateShowRequest request = new CreateShowRequest(
-            "friday-night",
+            "friday-night-admin",
             List.of("A1", "A2", "A3", "A4"),
             25000L,
             4
         );
 
         mockMvc.perform(post("/shows")
+                .header("Authorization", adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request))
-                .header("X-Request-ID", "req-create-show-1"))
+                .header("X-Request-ID", "req-create-show-admin"))
             .andExpect(status().isCreated())
-            .andExpect(header().string("X-Request-ID", "req-create-show-1"))
+            .andExpect(header().string("X-Request-ID", "req-create-show-admin"))
             .andExpect(jsonPath("$.id").isNotEmpty())
-            .andExpect(jsonPath("$.name").value("friday-night"))
+            .andExpect(jsonPath("$.name").value("friday-night-admin"))
             .andExpect(jsonPath("$.price_paise").value(25000))
             .andExpect(jsonPath("$.per_user_limit").value(4))
             .andExpect(jsonPath("$.total_seats").value(4))
@@ -72,6 +114,7 @@ class ShowControllerIntegrationTest {
         );
 
         mockMvc.perform(post("/shows")
+                .header("Authorization", adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isBadRequest())
@@ -91,6 +134,7 @@ class ShowControllerIntegrationTest {
             4
         );
         mockMvc.perform(post("/shows")
+                .header("Authorization", adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(blankName)))
             .andExpect(status().isBadRequest())
@@ -104,6 +148,7 @@ class ShowControllerIntegrationTest {
             4
         );
         mockMvc.perform(post("/shows")
+                .header("Authorization", adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(invalidPrice)))
             .andExpect(status().isBadRequest())
@@ -117,6 +162,7 @@ class ShowControllerIntegrationTest {
             4
         );
         mockMvc.perform(post("/shows")
+                .header("Authorization", adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(emptySeats)))
             .andExpect(status().isBadRequest())
@@ -124,16 +170,17 @@ class ShowControllerIntegrationTest {
     }
 
     @Test
-    @DisplayName("GET /shows/{id} - Should return show with reconciled seat counts")
-    void testGetShowSuccess() throws Exception {
+    @DisplayName("GET /shows/{id} - Should return show publicly without authentication")
+    void testGetShowSuccessPublicly() throws Exception {
         CreateShowRequest createRequest = new CreateShowRequest(
-            "saturday-gala",
+            "saturday-gala-public",
             List.of("B1", "B2", "B3"),
             50000L,
             2
         );
 
         String createRes = mockMvc.perform(post("/shows")
+                .header("Authorization", adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(createRequest)))
             .andExpect(status().isCreated())
@@ -143,10 +190,11 @@ class ShowControllerIntegrationTest {
 
         String showId = objectMapper.readTree(createRes).get("id").asText();
 
+        // Access without Authorization header
         mockMvc.perform(get("/shows/" + showId))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.id").value(showId))
-            .andExpect(jsonPath("$.name").value("saturday-gala"))
+            .andExpect(jsonPath("$.name").value("saturday-gala-public"))
             .andExpect(jsonPath("$.price_paise").value(50000))
             .andExpect(jsonPath("$.total_seats").value(3))
             .andExpect(jsonPath("$.available").value(3))
