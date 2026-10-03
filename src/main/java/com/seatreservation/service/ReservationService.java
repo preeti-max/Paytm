@@ -29,15 +29,18 @@ public class ReservationService {
     private final ShowRepository showRepository;
     private final SeatRepository seatRepository;
     private final ReservationRepository reservationRepository;
+    private final com.seatreservation.repository.UserShowLockRepository userShowLockRepository;
 
     public ReservationService(
         ShowRepository showRepository,
         SeatRepository seatRepository,
-        ReservationRepository reservationRepository
+        ReservationRepository reservationRepository,
+        com.seatreservation.repository.UserShowLockRepository userShowLockRepository
     ) {
         this.showRepository = showRepository;
         this.seatRepository = seatRepository;
         this.reservationRepository = reservationRepository;
+        this.userShowLockRepository = userShowLockRepository;
     }
 
     @Transactional
@@ -70,7 +73,27 @@ public class ReservationService {
         Show show = showRepository.findById(showId)
             .orElseThrow(() -> new ResourceNotFoundException("Show not found with id: " + showId));
 
-        // 3. Acquire pessimistic write lock on the requested seats in deterministic order
+        // 3. Acquire pessimistic lock on (showId, userId) to serialize per-user limit checks
+        userShowLockRepository.insertIfNotExists(showId, userId);
+        userShowLockRepository.findByIdForUpdate(new com.seatreservation.entity.UserShowLockId(showId, userId));
+
+        // 4. Check user's current confirmed seat count against show per-user limit
+        long currentConfirmedCount = reservationRepository.countConfirmedSeatsByUserAndShow(
+            showId,
+            userId,
+            ReservationStatus.CONFIRMED
+        );
+
+        if (currentConfirmedCount + normalizedSeats.size() > show.getPerUserLimit()) {
+            log.info("Per-user limit exceeded: userId={}, showId={}, current={}, requested={}, limit={}",
+                userId, showId, currentConfirmedCount, normalizedSeats.size(), show.getPerUserLimit());
+            throw new DomainConflictException(
+                ErrorCode.PER_USER_LIMIT,
+                "Exceeds per-user seat limit of " + show.getPerUserLimit() + " for this show"
+            );
+        }
+
+        // 5. Acquire pessimistic write lock on the requested seats in deterministic order
         List<Seat> lockedSeats = seatRepository.findSeatsForUpdate(showId, normalizedSeats);
 
         // Check if all requested seats exist in the show

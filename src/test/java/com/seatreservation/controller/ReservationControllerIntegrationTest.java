@@ -165,6 +165,44 @@ class ReservationControllerIntegrationTest {
     }
 
     @Test
+    @DisplayName("POST /shows/{id}/reserve - Should enforce per-user limit and reject excess requests with 409 PER_USER_LIMIT")
+    void testPerUserLimitEnforcement() throws Exception {
+        // Show with limit 2
+        String showId = createShow("limited-show", List.of("A1", "A2", "A3", "A4"), 25000L, 2);
+
+        // 1. Reserve 1 seat -> Success (1/2)
+        mockMvc.perform(post("/shows/" + showId + "/reserve")
+                .header("Authorization", user1Token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(new ReserveSeatRequest(List.of("A1")))))
+            .andExpect(status().isCreated());
+
+        // 2. Reserve 2 seats -> Rejection (1 + 2 = 3 > 2)
+        mockMvc.perform(post("/shows/" + showId + "/reserve")
+                .header("Authorization", user1Token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(new ReserveSeatRequest(List.of("A2", "A3")))))
+            .andExpect(status().isConflict())
+            .andExpect(jsonPath("$.error").value("PER_USER_LIMIT"))
+            .andExpect(jsonPath("$.message", containsString("Exceeds per-user seat limit")));
+
+        // 3. Reserve 1 seat -> Success (2/2)
+        mockMvc.perform(post("/shows/" + showId + "/reserve")
+                .header("Authorization", user1Token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(new ReserveSeatRequest(List.of("A2")))))
+            .andExpect(status().isCreated());
+
+        // 4. Reserve 1 more seat -> Rejection (2 + 1 = 3 > 2)
+        mockMvc.perform(post("/shows/" + showId + "/reserve")
+                .header("Authorization", user1Token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(new ReserveSeatRequest(List.of("A3")))))
+            .andExpect(status().isConflict())
+            .andExpect(jsonPath("$.error").value("PER_USER_LIMIT"));
+    }
+
+    @Test
     @DisplayName("POST /shows/{id}/reserve - Unauthenticated request returns 401")
     void testUnauthenticatedReservation() throws Exception {
         mockMvc.perform(post("/shows/" + UUID.randomUUID() + "/reserve")
