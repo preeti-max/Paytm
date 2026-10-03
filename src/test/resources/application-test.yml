@@ -1,6 +1,14 @@
 spring:
   flyway:
-    enabled: false
+    enabled: true
+    locations: classpath:db/migration
   jpa:
     hibernate:
-      ddl-auto: none
+      ddl-auto: validate
+    open-in-view: false
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+
+zonky:
+  test:
+    database:
+      provider: zonky
