@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: seat-reservation-service
+    runtime: docker
+    dockerfilePath: Dockerfile
+    plan: free
+    healthCheckPath: /health/live
+    envVars:
+      - key: SPRING_PROFILES_ACTIVE
+        value: prod
+      - key: DB_URL
+        fromDatabase:
+          name: seat-reservation-postgres
+          property: connectionString
+      - key: DB_USERNAME
+        fromDatabase:
+          name: seat-reservation-postgres
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: seat-reservation-postgres
+          property: password
+      - key: JWT_SECRET
+        generateValue: true
+      - key: PORT
+        value: 8080
+
+databases:
+  - name: seat-reservation-postgres
+    plan: free
+    databaseName: seat_reservation
+    user: postgres
