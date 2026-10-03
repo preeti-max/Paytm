@@ -239,6 +239,101 @@ class ReservationControllerIntegrationTest {
     }
 
     @Test
+    @DisplayName("POST /reservations/{id}/cancel - Owner cancellation releases seat, allowing subsequent booking")
+    void testCancelReservationSuccess() throws Exception {
+        String showId = createShow("cancel-show-1", List.of("C1", "C2"), 30000L, 4);
+
+        // 1. User 1 reserves C1
+        String reserveRes = mockMvc.perform(post("/shows/" + showId + "/reserve")
+                .header("Authorization", user1Token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(new ReserveSeatRequest(List.of("C1")))))
+            .andExpect(status().isCreated())
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+
+        String reservationId = objectMapper.readTree(reserveRes).get("reservation_id").asText();
+
+        // 2. User 1 cancels reservation
+        mockMvc.perform(post("/reservations/" + reservationId + "/cancel")
+                .header("Authorization", user1Token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.reservation_id").value(reservationId))
+            .andExpect(jsonPath("$.status").value("cancelled"))
+            .andExpect(jsonPath("$.seats", contains("C1")));
+
+        // 3. Verify show reconciliation (C1 is available again)
+        mockMvc.perform(get("/shows/" + showId))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.available").value(2))
+            .andExpect(jsonPath("$.confirmed").value(0));
+
+        // 4. User 2 can now reserve C1 successfully
+        mockMvc.perform(post("/shows/" + showId + "/reserve")
+                .header("Authorization", user2Token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(new ReserveSeatRequest(List.of("C1")))))
+            .andExpect(status().isCreated())
+            .andExpect(jsonPath("$.user_id").value("user-2"))
+            .andExpect(jsonPath("$.status").value("confirmed"));
+    }
+
+    @Test
+    @DisplayName("POST /reservations/{id}/cancel - Unauthorized user cannot cancel another user's reservation (403 FORBIDDEN)")
+    void testUnauthorizedCancellation() throws Exception {
+        String showId = createShow("cancel-show-2", List.of("D1"), 20000L, 4);
+
+        // User 1 reserves D1
+        String reserveRes = mockMvc.perform(post("/shows/" + showId + "/reserve")
+                .header("Authorization", user1Token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(new ReserveSeatRequest(List.of("D1")))))
+            .andExpect(status().isCreated())
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+
+        String reservationId = objectMapper.readTree(reserveRes).get("reservation_id").asText();
+
+        // User 2 attempts to cancel User 1's reservation
+        mockMvc.perform(post("/reservations/" + reservationId + "/cancel")
+                .header("Authorization", user2Token))
+            .andExpect(status().isForbidden())
+            .andExpect(jsonPath("$.error").value("FORBIDDEN"))
+            .andExpect(jsonPath("$.message", containsString("permission")));
+    }
+
+    @Test
+    @DisplayName("POST /reservations/{id}/cancel - Double cancellation returns 409 RESERVATION_ALREADY_CANCELLED")
+    void testDoubleCancellation() throws Exception {
+        String showId = createShow("cancel-show-3", List.of("E1"), 20000L, 4);
+
+        String reserveRes = mockMvc.perform(post("/shows/" + showId + "/reserve")
+                .header("Authorization", user1Token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(new ReserveSeatRequest(List.of("E1")))))
+            .andExpect(status().isCreated())
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+
+        String reservationId = objectMapper.readTree(reserveRes).get("reservation_id").asText();
+
+        // First cancellation -> 200 OK
+        mockMvc.perform(post("/reservations/" + reservationId + "/cancel")
+                .header("Authorization", user1Token))
+            .andExpect(status().isOk());
+
+        // Second cancellation -> 409 Conflict
+        mockMvc.perform(post("/reservations/" + reservationId + "/cancel")
+                .header("Authorization", user1Token))
+            .andExpect(status().isConflict())
+            .andExpect(jsonPath("$.error").value("RESERVATION_ALREADY_CANCELLED"))
+            .andExpect(jsonPath("$.message", containsString("already been cancelled")));
+    }
+
+    @Test
     @DisplayName("POST /shows/{id}/reserve - Identity spoofing: Body field cannot override JWT identity")
     void testIdentitySpoofingAttempt() throws Exception {
         String showId = createShow("spoof-show", List.of("A1"), 25000L, 4);

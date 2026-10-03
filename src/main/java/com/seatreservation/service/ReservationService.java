@@ -226,6 +226,59 @@ public class ReservationService {
         );
     }
 
+    @Transactional
+    public ReservationResponse cancelReservation(UUID reservationId, String userId) {
+        Reservation reservation = reservationRepository.findByIdForUpdate(reservationId)
+            .orElseThrow(() -> new ResourceNotFoundException("Reservation not found with id: " + reservationId));
+
+        if (!reservation.getUserId().equals(userId)) {
+            log.warn("Unauthorized cancellation attempt: reservationId={}, owner={}, requester={}",
+                reservationId, reservation.getUserId(), userId);
+            throw new com.seatreservation.exception.ForbiddenException(
+                "You do not have permission to cancel this reservation"
+            );
+        }
+
+        if (reservation.getStatus() == ReservationStatus.CANCELLED) {
+            log.warn("Double cancellation attempted: reservationId={}, userId={}", reservationId, userId);
+            throw new DomainConflictException(
+                ErrorCode.RESERVATION_ALREADY_CANCELLED,
+                "Reservation has already been cancelled"
+            );
+        }
+
+        // Transition reservation status CONFIRMED -> CANCELLED
+        reservation.setStatus(ReservationStatus.CANCELLED);
+        reservationRepository.save(reservation);
+
+        // Fetch and lock associated seats in deterministic order to release them
+        List<String> seatNumbers = reservation.getSeats().stream()
+            .map(Seat::getSeatNumber)
+            .sorted()
+            .toList();
+
+        List<Seat> seatsToRelease = seatRepository.findSeatsForUpdate(reservation.getShow().getId(), seatNumbers);
+
+        for (Seat seat : seatsToRelease) {
+            seat.setStatus(SeatStatus.AVAILABLE);
+            seat.setHeldBy(null);
+            seat.setReservationId(null);
+        }
+        seatRepository.saveAll(seatsToRelease);
+
+        log.info("Reservation cancelled successfully: reservationId={}, showId={}, userId={}, releasedSeats={}",
+            reservationId, reservation.getShow().getId(), userId, seatNumbers);
+
+        return new ReservationResponse(
+            reservation.getId(),
+            reservation.getShow().getId(),
+            userId,
+            seatNumbers,
+            reservation.getAmountPaise(),
+            "cancelled"
+        );
+    }
+
     private static String computeSha256Hash(String input) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
