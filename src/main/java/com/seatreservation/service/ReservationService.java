@@ -102,7 +102,8 @@ public class ReservationService {
                     // Case 1: Same key + same body -> return original reservation
                     Reservation orig = record.getReservation();
                     reservationMetrics.recordDeclined("idempotent_replay");
-                    log.info("Idempotent replay: key={}, reservationId={}, userId={}", trimmedKey, orig.getId(), userId);
+                    log.info("event=RESERVATION_IDEMPOTENT_REPLAY show_id={} user_id={} reservation_id={} idempotency_key={}",
+                        showId, userId, orig.getId(), trimmedKey);
                     List<String> origSeats = orig.getSeats().stream().map(Seat::getSeatNumber).sorted().toList();
                     return new ReservationResponse(
                         orig.getId(),
@@ -115,7 +116,8 @@ public class ReservationService {
                 } else {
                     // Case 2: Same key + different body -> 409 IDEMPOTENCY_KEY_REUSED
                     reservationMetrics.recordDeclined("idempotency_mismatch");
-                    log.warn("Idempotency key reused with mismatched body: key={}, userId={}, showId={}", trimmedKey, userId, showId);
+                    log.warn("event=RESERVATION_DECLINED show_id={} user_id={} seats={} reason=IDEMPOTENCY_KEY_REUSED idempotency_key={}",
+                        showId, userId, normalizedSeats, trimmedKey);
                     throw new DomainConflictException(
                         ErrorCode.IDEMPOTENCY_KEY_REUSED,
                         "Idempotency key was already used with a different request payload"
@@ -133,8 +135,8 @@ public class ReservationService {
 
         if (currentConfirmedCount + normalizedSeats.size() > show.getPerUserLimit()) {
             reservationMetrics.recordDeclined("per_user_limit");
-            log.info("Per-user limit exceeded: userId={}, showId={}, current={}, requested={}, limit={}",
-                userId, showId, currentConfirmedCount, normalizedSeats.size(), show.getPerUserLimit());
+            log.warn("event=RESERVATION_DECLINED show_id={} user_id={} seats={} reason=PER_USER_LIMIT current_count={} requested_count={} limit={}",
+                showId, userId, normalizedSeats, currentConfirmedCount, normalizedSeats.size(), show.getPerUserLimit());
             throw new DomainConflictException(
                 ErrorCode.PER_USER_LIMIT,
                 "Exceeds per-user seat limit of " + show.getPerUserLimit() + " for this show"
@@ -147,8 +149,8 @@ public class ReservationService {
         // Check if all requested seats exist in the show
         if (lockedSeats.size() != normalizedSeats.size()) {
             reservationMetrics.recordDeclined("seat_taken");
-            log.warn("Reservation conflict: not all requested seats exist. Requested={}, Found={}",
-                normalizedSeats, lockedSeats.stream().map(Seat::getSeatNumber).toList());
+            log.warn("event=RESERVATION_DECLINED show_id={} user_id={} seats={} reason=SEAT_NOT_FOUND",
+                showId, userId, normalizedSeats);
             throw new DomainConflictException(
                 ErrorCode.SEAT_TAKEN,
                 "One or more requested seats are unavailable"
@@ -159,7 +161,8 @@ public class ReservationService {
         for (Seat seat : lockedSeats) {
             if (seat.getStatus() != SeatStatus.AVAILABLE) {
                 reservationMetrics.recordDeclined("seat_taken");
-                log.info("Reservation conflict: seat {} is in status {}", seat.getSeatNumber(), seat.getStatus());
+                log.warn("event=RESERVATION_DECLINED show_id={} user_id={} seats={} conflict_seat={} seat_status={} reason=SEAT_TAKEN",
+                    showId, userId, normalizedSeats, seat.getSeatNumber(), seat.getStatus());
                 throw new DomainConflictException(
                     ErrorCode.SEAT_TAKEN,
                     "One or more requested seats are unavailable"
@@ -202,7 +205,7 @@ public class ReservationService {
             try {
                 idempotencyKeyRepository.save(idempotencyRecord);
             } catch (DataIntegrityViolationException e) {
-                log.warn("Unique constraint on idempotency key triggered concurrently: key={}", idempotencyKey);
+                log.warn("event=IDEMPOTENCY_KEY_COLLISION key={}", idempotencyKey);
                 Optional<IdempotencyKeyRecord> fallbackOpt = idempotencyKeyRepository
                     .findByShowIdAndUserIdAndIdempotencyKey(showId, userId, idempotencyKey.trim());
                 if (fallbackOpt.isPresent()) {
@@ -225,8 +228,8 @@ public class ReservationService {
         // Record confirmed metric
         reservationMetrics.recordConfirmed();
 
-        log.info("Reservation confirmed: id={}, showId={}, userId={}, seats={}, amountPaise={}",
-            reservation.getId(), showId, userId, normalizedSeats, amountPaise);
+        log.info("event=RESERVATION_CONFIRMED show_id={} user_id={} reservation_id={} seats={} amount_paise={}",
+            showId, userId, reservation.getId(), normalizedSeats, amountPaise);
 
         return new ReservationResponse(
             reservation.getId(),
@@ -244,7 +247,7 @@ public class ReservationService {
             .orElseThrow(() -> new ResourceNotFoundException("Reservation not found with id: " + reservationId));
 
         if (!reservation.getUserId().equals(userId)) {
-            log.warn("Unauthorized cancellation attempt: reservationId={}, owner={}, requester={}",
+            log.warn("event=RESERVATION_CANCEL_UNAUTHORIZED reservation_id={} owner={} requester={}",
                 reservationId, reservation.getUserId(), userId);
             throw new com.seatreservation.exception.ForbiddenException(
                 "You do not have permission to cancel this reservation"
@@ -252,7 +255,7 @@ public class ReservationService {
         }
 
         if (reservation.getStatus() == ReservationStatus.CANCELLED) {
-            log.warn("Double cancellation attempted: reservationId={}, userId={}", reservationId, userId);
+            log.warn("event=RESERVATION_ALREADY_CANCELLED reservation_id={} user_id={}", reservationId, userId);
             throw new DomainConflictException(
                 ErrorCode.RESERVATION_ALREADY_CANCELLED,
                 "Reservation has already been cancelled"
@@ -280,7 +283,7 @@ public class ReservationService {
 
         reservationMetrics.recordCancelled();
 
-        log.info("Reservation cancelled successfully: reservationId={}, showId={}, userId={}, releasedSeats={}",
+        log.info("event=RESERVATION_CANCELLED reservation_id={} show_id={} user_id={} released_seats={}",
             reservationId, reservation.getShow().getId(), userId, seatNumbers);
 
         return new ReservationResponse(
