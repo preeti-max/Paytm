@@ -37,6 +37,14 @@ public class GlobalExceptionHandler {
             .body(new ErrorResponse(ErrorCode.RESOURCE_NOT_FOUND, ex.getMessage(), requestId));
     }
 
+    @ExceptionHandler(org.springframework.web.servlet.resource.NoResourceFoundException.class)
+    public ResponseEntity<ErrorResponse> handleNoResourceFound(org.springframework.web.servlet.resource.NoResourceFoundException ex) {
+        String requestId = RequestIdFilter.getCurrentRequestId();
+        log.warn("No resource found: resourcePath={}, request_id={}", ex.getResourcePath(), requestId);
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+            .body(new ErrorResponse(ErrorCode.RESOURCE_NOT_FOUND, "Resource not found: " + ex.getResourcePath(), requestId));
+    }
+
     @ExceptionHandler(BadRequestException.class)
     public ResponseEntity<ErrorResponse> handleBadRequest(BadRequestException ex) {
         String requestId = RequestIdFilter.getCurrentRequestId();

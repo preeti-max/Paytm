@@ -7,6 +7,7 @@ import com.seatreservation.exception.BadRequestException;
 import com.seatreservation.exception.DomainConflictException;
 import com.seatreservation.exception.ErrorCode;
 import com.seatreservation.exception.ResourceNotFoundException;
+import com.seatreservation.metrics.ReservationMetrics;
 import com.seatreservation.repository.IdempotencyKeyRepository;
 import com.seatreservation.repository.ReservationRepository;
 import com.seatreservation.repository.SeatRepository;
@@ -33,19 +34,22 @@ public class ReservationService {
     private final ReservationRepository reservationRepository;
     private final UserShowLockRepository userShowLockRepository;
     private final IdempotencyKeyRepository idempotencyKeyRepository;
+    private final ReservationMetrics reservationMetrics;
 
     public ReservationService(
         ShowRepository showRepository,
         SeatRepository seatRepository,
         ReservationRepository reservationRepository,
         UserShowLockRepository userShowLockRepository,
-        IdempotencyKeyRepository idempotencyKeyRepository
+        IdempotencyKeyRepository idempotencyKeyRepository,
+        ReservationMetrics reservationMetrics
     ) {
         this.showRepository = showRepository;
         this.seatRepository = seatRepository;
         this.reservationRepository = reservationRepository;
         this.userShowLockRepository = userShowLockRepository;
         this.idempotencyKeyRepository = idempotencyKeyRepository;
+        this.reservationMetrics = reservationMetrics;
     }
 
     @Transactional
@@ -97,6 +101,7 @@ public class ReservationService {
                 if (record.getRequestHash().equals(requestHash)) {
                     // Case 1: Same key + same body -> return original reservation
                     Reservation orig = record.getReservation();
+                    reservationMetrics.recordDeclined("idempotent_replay");
                     log.info("Idempotent replay: key={}, reservationId={}, userId={}", trimmedKey, orig.getId(), userId);
                     List<String> origSeats = orig.getSeats().stream().map(Seat::getSeatNumber).sorted().toList();
                     return new ReservationResponse(
@@ -109,6 +114,7 @@ public class ReservationService {
                     );
                 } else {
                     // Case 2: Same key + different body -> 409 IDEMPOTENCY_KEY_REUSED
+                    reservationMetrics.recordDeclined("idempotency_mismatch");
                     log.warn("Idempotency key reused with mismatched body: key={}, userId={}, showId={}", trimmedKey, userId, showId);
                     throw new DomainConflictException(
                         ErrorCode.IDEMPOTENCY_KEY_REUSED,
@@ -126,6 +132,7 @@ public class ReservationService {
         );
 
         if (currentConfirmedCount + normalizedSeats.size() > show.getPerUserLimit()) {
+            reservationMetrics.recordDeclined("per_user_limit");
             log.info("Per-user limit exceeded: userId={}, showId={}, current={}, requested={}, limit={}",
                 userId, showId, currentConfirmedCount, normalizedSeats.size(), show.getPerUserLimit());
             throw new DomainConflictException(
@@ -139,6 +146,7 @@ public class ReservationService {
 
         // Check if all requested seats exist in the show
         if (lockedSeats.size() != normalizedSeats.size()) {
+            reservationMetrics.recordDeclined("seat_taken");
             log.warn("Reservation conflict: not all requested seats exist. Requested={}, Found={}",
                 normalizedSeats, lockedSeats.stream().map(Seat::getSeatNumber).toList());
             throw new DomainConflictException(
@@ -150,6 +158,7 @@ public class ReservationService {
         // 7. Verify all seats are currently AVAILABLE (All-or-Nothing semantics)
         for (Seat seat : lockedSeats) {
             if (seat.getStatus() != SeatStatus.AVAILABLE) {
+                reservationMetrics.recordDeclined("seat_taken");
                 log.info("Reservation conflict: seat {} is in status {}", seat.getSeatNumber(), seat.getStatus());
                 throw new DomainConflictException(
                     ErrorCode.SEAT_TAKEN,
@@ -193,12 +202,12 @@ public class ReservationService {
             try {
                 idempotencyKeyRepository.save(idempotencyRecord);
             } catch (DataIntegrityViolationException e) {
-                // If concurrent identical insert somehow won unique constraint
                 log.warn("Unique constraint on idempotency key triggered concurrently: key={}", idempotencyKey);
                 Optional<IdempotencyKeyRecord> fallbackOpt = idempotencyKeyRepository
                     .findByShowIdAndUserIdAndIdempotencyKey(showId, userId, idempotencyKey.trim());
                 if (fallbackOpt.isPresent()) {
                     Reservation orig = fallbackOpt.get().getReservation();
+                    reservationMetrics.recordDeclined("idempotent_replay");
                     List<String> origSeats = orig.getSeats().stream().map(Seat::getSeatNumber).sorted().toList();
                     return new ReservationResponse(
                         orig.getId(),
@@ -212,6 +221,9 @@ public class ReservationService {
                 throw e;
             }
         }
+
+        // Record confirmed metric
+        reservationMetrics.recordConfirmed();
 
         log.info("Reservation confirmed: id={}, showId={}, userId={}, seats={}, amountPaise={}",
             reservation.getId(), showId, userId, normalizedSeats, amountPaise);
@@ -265,6 +277,8 @@ public class ReservationService {
             seat.setReservationId(null);
         }
         seatRepository.saveAll(seatsToRelease);
+
+        reservationMetrics.recordCancelled();
 
         log.info("Reservation cancelled successfully: reservationId={}, showId={}, userId={}, releasedSeats={}",
             reservationId, reservation.getShow().getId(), userId, seatNumbers);
